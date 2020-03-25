@@ -1,0 +1,358 @@
+---
+title: "Catnip Shiny Raw Script"
+author: "Bo Yuan"
+date: "3/25/2020"
+output: html_document
+---
+
+```{r, eval=F, warning=F, message=FALSE}
+library(shiny)
+library(readxl)
+library(rebus)
+library(writexl)
+library(rdrop2)
+library(DT)
+library(tidyverse)
+library(RColorBrewer)
+library(ggrepel)
+
+
+# Import data from Dropbox ----
+drop_auth()
+token = drop_auth()
+saveRDS(token, file = "token.rds")
+
+theme_set(theme_bw() +
+            theme(strip.background = element_blank(),
+                  strip.text = element_text(face = "bold", colour = "black", size = 12),
+                  axis.text = element_text(colour = "black", size = 11),
+                  axis.title = element_text(size = 14),
+                  title = element_text(face = "bold"))
+)
+
+
+# Define core functions ----
+# Barplot making
+
+
+# UI ----
+ui <- fluidPage(
+  
+  # Application title
+  titlePanel(strong("Catnip Quality Control")),
+  
+  # Sidebar with a slider input for number of bins 
+  sidebarLayout(
+    sidebarPanel(
+      ### Dataset
+      h4(strong(em("Dataset Input"))), 
+      # template download
+      downloadButton("downloadTemplate", "Download quality control template",
+                     style="color: white; background-color: steelblue; border-color: black"),
+      # user upload datset
+      fileInput(inputId = "userfile", label = NULL, buttonLabel = "Browse...Excel input",
+                width = '700px', placeholder = "Upload catnip quality control dataset"),
+      
+      ### Plot control
+      h4(strong(em("Global Plot Control"))), 
+      
+      fluidRow(
+        column(6, 
+               sliderInput(inputId = "pltHeight", label = "Plot height", 
+                           min = 100, max = 4000, step = 50, value = 600),
+               sliderInput(inputId = "pltWidth", label = "Plot Width", 
+                           min = 100, max = 4000, step = 50, value = 900)),
+        # column(1),
+        column(6, 
+               radioButtons(inputId = "eachCmpd", label = "Show compounds",
+                            choices = c("Individual" = T, "Total" = F), 
+                            selected = T, inline = T),
+               selectInput(inputId = "plotColor", label = "Colors", 
+                           choices = c("Default" = 1, "Accent" = "Accent", "Dark2" = "Dark2", "Paired" = "Paired", "Pastel1" = "Pastel1", "Pastel2" = "Pastel2", "Set1" = "Set1", "Set2" = "Set2", "Set3" = "Set3", "Gradient greys" = "Greys", "Gradient blues" = "Blues", "Gradient greens" = "Greens"), 
+                           selected = 1),
+               sliderInput(inputId = "facetRowNumber", label = "Display row numbers",
+                           min = 1, max = 20, value = 2)
+        )
+      ), 
+      
+      
+      strong(em("Bar plot"), style="color: darkred"), 
+      # Format
+      fluidRow(
+        # doge, stack vs. fill
+        column(7, radioButtons(inputId = "barPosition", label = "Compounds display format",
+                               choices = c("Dodge" = "dodge", "Stack" = "stack", "Fill" = "fill"), 
+                               selected = "dodge", inline = T)),
+        # Orientation?
+        column(4, strong("Flip plot"), checkboxInput(inputId = "FlipPlot", label = "", value = T))
+      ),
+      
+      
+      strong(em("Box plot", style = "color: darkred")), 
+      fluidRow(
+        column(6, sliderInput(inputId = "bubbleSize", label = "Bubble size",
+                              min = .5, max = 8, step = .25, value = 3)),
+        column(1),
+        column(4, strong("Show names"), checkboxInput(inputId = "showText", label = "", value = F))
+      ),
+      
+      h4(strong(em("Content table"))), 
+      # show standard deviation or not (show sd not allowing for numeric assort)
+      fluidRow(
+        column(6, checkboxInput(inputId = "DTstd", label = "Show standard deviation", value = F)),
+        column(6, downloadButton("downloadContent", "Save content table",
+                                 style="color: white; background-color: orange; border-color: black"))
+      )
+    ),
+    
+    # Show a plot of the generated distribution # ----
+    mainPanel(
+      tabsetPanel(
+        tabPanel("Bar plot", br(), uiOutput("ui.barplot")),
+        tabPanel("Box plot", br(), uiOutput("ui.boxplot")),
+        tabPanel("Content table",br(), dataTableOutput("contentTable"))
+      )
+    )
+  )
+)
+
+
+
+
+# SERVER
+server <- function(input, output) {
+  
+  
+  
+  # read template from my dropbox
+  df.CatnipQCtemplate = drop_read_csv(file = "catnip Quant December 2019.csv")
+  output$downloadTemplate = downloadHandler(
+    filename = "Catnip QC Template.xlsx",
+    content = function(file) {
+      write_xlsx(df.CatnipQCtemplate, path = file)  
+    }
+  )
+  
+  
+  # bar color specification
+  colorSet = c("Accent", "Dark2", "Paired", "Pastel1", "Pastel2", "Set1", "Set2", "Set3", 
+               "Greys", "Blues", "Greens")
+  max.colorSet = c(8, 8, 12, 9, 8, 9, 8, 12, rep(9, 3))
+  names(max.colorSet) = colorSet # maximum color choice number within each color palette set
+  
+  
+  
+  # Dataset preparation: user input vs. default dataset-<>--<>--<>--<>--<>--<>--<>--<>-
+  simpleStats = reactive({  # EVEN IF NO INPUT FILE, THIS REACTIVE SCRIPT STILL RUNS...!! A CONVENINET FEATURE TO REMEMBER
+    
+    if(is.null(input$userfile)) { d = df.CatnipQCtemplate # if no userinput file, use template
+    } else {
+      infile = input$userfile # update d with user input dataset
+      d = read_excel(infile$datapath) # d being the original dataset
+    } 
+    
+    # convert group as ordered factor, in original order
+    unique.groups = d$Groups[!d$Groups %>% duplicated()] 
+    d$Groups = d$Groups %>% factor(levels = unique.groups, ordered = T)
+    
+    d.summary = 
+      d %>% group_by(Groups) %>%
+      gather(contains("NA"), contains("NT"), contains("DHNL"), contains("NL"), contains("total"), 
+             key = compounds, value = content) %>%
+      group_by(Groups, compounds) %>%
+      summarise(content.mean = mean(content), 
+                content.sd = sd(content)) # d.summary being the original summary stats dataset 
+    
+    #Feb 2 2020 notes:
+    if(input$eachCmpd == T) { # plot individual compounds
+      d.summary.cmpdSelected = d.summary %>% filter(!compounds %>% str_detect("total")) 
+    } else{ # plot subtotal of each category of compounds
+      d.summary.cmpdSelected = d.summary %>% filter(compounds %>% str_detect("total")) 
+    }
+    
+    return(list(d, d.summary, d.summary.cmpdSelected)) # datatable shows always individual compounds and the total
+  })
+  
+  d = reactive({  simpleStats()[[1]] }) 
+  d.summary = reactive({ simpleStats()[[2]] })  
+  d.summary.cmpdSelected = reactive({ simpleStats()[[3]] }) 
+  
+  
+  # bar plot
+  func.plt.contentBar = function(myDataset, FlipPlot = T, 
+                                 barPosition = "dodge" , plotColor = 1, bar.rowNumber) {
+    dataset = myDataset
+    if(barPosition %in% c("stack", "fill")) { 
+      # do not stack the final total content for stacked bars
+      # either stack subtotal of individual compounds depend on argument "eachCmpd"
+      dataset = dataset %>% filter(compounds != "total")
+    }
+    
+    # basc plot
+    plt = dataset %>% 
+      ggplot(aes(x = Groups, y = content.mean)) +
+      labs(title = "Compounds content in catnip (mg/100 g dry weight)")
+    
+    # Barplot position
+    if (barPosition == "dodge") { # add error bar
+      plt = plt + 
+        geom_bar(stat = "identity", aes(fill = Groups), # when dodged, color with groups
+                 alpha = .7, width = .9) +
+        geom_errorbar(aes(ymin = content.mean - content.sd,
+                          ymax = content.mean + content.sd,
+                          color = Groups),
+                      width = 0.5) +
+        theme(legend.position = "None")  # no legend for groups annotation
+    } else if (barPosition == "stack") {
+      plt = plt + 
+        geom_bar(stat = "identity", aes(fill = compounds), # when stack or filled, color with compounds
+                 position = "stack", alpha = .9, width = .9) 
+    } else if (barPosition == "fill") {
+      plt = plt + 
+        geom_bar(stat = "identity", aes(fill = compounds),
+                 position = "fill", alpha = .9, width = .9) 
+    }
+    
+    # flip plot? 
+    if(FlipPlot == T) {
+      plt = plt + coord_flip() 
+      if (barPosition == "dodge") { # if fill or stack, no need to facet regarding compounds
+        plt = plt + facet_wrap(~compounds, scales = "free_x", nrow = bar.rowNumber) 
+        # group axis vertical, free the content x-axis }
+      }
+    } else { # no flip, i.e., group on the horizontal axis
+      plt = plt + 
+        theme(axis.text.x = element_text(angle = 90, hjust = 1))
+      if (barPosition == "dodge") { # if fill or stack, no need to facet regarding compounds
+        plt = plt + facet_wrap(~compounds, scales = "free_y", nrow = bar.rowNumber) 
+        # group axis horizontal, free content y-axis
+      }
+    }
+    
+    # Color by compounds
+    if(barPosition %in% c("stack", "fill") & plotColor != 1) {
+      n.cmpds = dataset$compounds %>% n_distinct()
+      
+      if(n.cmpds > max.colorSet[plotColor]) {
+        color.cmpds = colorRampPalette(brewer.pal(max.colorSet[plotColor], plotColor))(n.cmpds)
+        plt = plt + scale_color_manual(values = color.cmpds) +
+          scale_fill_manual(values = color.cmpds)
+      } else {
+        plt = plt + scale_color_brewer(palette = plotColor) + scale_fill_brewer(palette = plotColor)
+      }
+    }
+    
+    # Color by groups
+    if(barPosition == "dodge" & plotColor != 1) {
+      n.groups = dataset$Groups %>% n_distinct() # group number
+      
+      if(n.groups > max.colorSet[plotColor]) { # more finely divided color steps
+        color.groups = colorRampPalette(brewer.pal(max.colorSet[plotColor], plotColor))(n.groups)
+        plt = plt + scale_color_manual(values = color.groups) +
+          scale_fill_manual(values = color.groups)
+      } else { plt = plt + scale_color_brewer(palette = plotColor) + scale_fill_brewer(palette = plotColor) }
+      
+    }
+    
+    return(plt)
+    
+  }
+  
+  barplotContent = reactive({
+    d.summary.cmpdSelected() %>% 
+      func.plt.contentBar(input$FlipPlot, barPosition = input$barPosition, input$plotColor, 
+                          bar.rowNumber = input$facetRowNumber) 
+  }) 
+  output$barplotContent = renderPlot({ barplotContent() }) # summary bar plot
+  output$ui.barplot = renderUI({
+    plotOutput("barplotContent", height = input$pltHeight, width = input$pltWidth)
+  }) 
+  
+  
+  
+  # Box plot -<>--<>--<>--<>--<>--<>--<>--<>--<>--<>--<>-
+  func.plt.box = function(dataset, box.facetRowNumber, plotColor = 1, bubbleSize, showText = F){
+    set.seed(2020) # do not change bubble point position when update point size
+    plt = dataset %>% 
+      ggplot(aes(x = 1, y = content.mean, fill = compounds, color = compounds)) +
+      geom_boxplot(alpha = .2, outlier.alpha = 0) + 
+      geom_point(position = position_jitter(.2), 
+                 shape = 21, fill = "white", size = bubbleSize) +
+      facet_wrap(~ compounds, scales = "free_y", nrow = box.facetRowNumber) +
+      theme(legend.position = "none", 
+            axis.text.x = element_blank(), 
+            axis.title.x = element_blank(),
+            axis.ticks.x = element_blank()) +
+      labs(y = "Averaged content (mg/100g dry mass)", 
+           title = "Compound content distribution boxplot")
+    
+    # specify color
+    if (plotColor !=1 ){ # 1 being default value without uses' color input
+      n.cmpds = dataset$compounds %>% n_distinct()
+      if(n.cmpds > max.colorSet[plotColor]) {
+        color.cmpds = colorRampPalette(brewer.pal(max.colorSet[plotColor], plotColor))(n.cmpds)
+        plt = plt + scale_color_manual(values = color.cmpds) +
+          scale_fill_manual(values = color.cmpds)
+      } else {
+        plt = plt + scale_color_brewer(palette = plotColor) + scale_fill_brewer(palette = plotColor)
+      }
+    } 
+    
+    if (showText == T) {
+      plt = plt + geom_text_repel(aes(label = Groups))
+    }
+    
+    return(plt)
+  } 
+  
+  output$boxplotContent = renderPlot({ 
+    d.summary.cmpdSelected() %>% 
+      func.plt.box(box.facetRowNumber = input$facetRowNumber,
+                   plotColor = input$plotColor, bubbleSize = input$bubbleSize, showText = input$showText) 
+  })
+  
+  output$ui.boxplot = renderUI({
+    plotOutput("boxplotContent", height = input$pltHeight, width = input$pltWidth)
+  })
+  
+  
+  # output summary table -<>--<>--<>--<>--<>--<>--<>--<>--<>--<>--<>--<>-
+  # Define function combine mean with standard deviation
+  func.d.summary.wrapUp = function(d.summary, showSD = F){
+    if (showSD == F) {
+      d.summary = d.summary %>% 
+        select(Groups, compounds, content.mean) %>%
+        mutate(content.mean = round(content.mean, 2)) %>%
+        spread(key = compounds, value = content.mean) 
+    } else { # output both average and standard deviation
+      d.summary = d.summary %>% 
+        mutate(content = paste(round(content.mean, 2), "±", round(content.sd, 2)) ) %>%
+        select(Groups, compounds, content) %>%
+        spread(key = compounds, value = content)
+    }
+    return(d.summary)
+  }
+  # combine average with sd 
+  d.summaryDToutput =  reactive({ d.summary() %>% func.d.summary.wrapUp(showSD = input$DTstd) })
+  output$contentTable = renderDataTable({ d.summaryDToutput() }) 
+  # save content table
+  output$downloadContent = downloadHandler(
+    filename = "Catnip content.xlsx",
+    content = function(file) {
+      write_xlsx(d.summaryDToutput(), 
+                 # whatever online table output, always show up mean, sd and mean with sd when saved 
+                 path = file)  
+    }
+  )
+}
+
+# Run the application 
+shinyApp(ui = ui, server = server)
+
+
+
+
+# ----------
+
+```
+

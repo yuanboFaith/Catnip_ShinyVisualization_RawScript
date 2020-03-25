@@ -1,0 +1,7 @@
+name: "Catnip Shiny Raw Script"
+navbar:
+  title: "Catnip Shiny Raw Script"
+left:
+  - text: "R script"
+href: index.html
+output_dir: "."
