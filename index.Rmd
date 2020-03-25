@@ -1,9 +1,14 @@
 ---
-title: "Catnip Shiny Raw Script"
+title: " "
 author: "Bo Yuan"
 date: "3/25/2020"
 output: html_document
 ---
+
+<b>
+
+Below presents the original script for construction of the [R Shiny interactive visualization App](https://boyuan.shinyapps.io/CatnipQC/) for Catnip QC data. </b>  
+
 
 ```{r, eval=F, warning=F, message=FALSE}
 library(shiny)

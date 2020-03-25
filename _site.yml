@@ -1,6 +1,6 @@
-name: "Catnip Shiny Raw Script"
+name: " "
 navbar:
-  title: "Catnip Shiny Raw Script"
+  title: "Raw Script for Catnip Shiny App Construction"
 left:
   - text: "R script"
 href: index.html
